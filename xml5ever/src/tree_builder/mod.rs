@@ -59,6 +59,7 @@ impl NamespaceMapStack {
 }
 
 #[doc(hidden)]
+#[derive(Clone)]
 pub struct NamespaceMap {
     // Map that maps prefixes to URI.
     //
@@ -80,6 +81,12 @@ impl Debug for NamespaceMap {
     }
 }
 
+impl Default for NamespaceMap {
+    fn default() -> NamespaceMap {
+        NamespaceMap::empty()
+    }
+}
+
 impl NamespaceMap {
     // Returns an empty namespace.
     #[doc(hidden)]
@@ -89,7 +96,7 @@ impl NamespaceMap {
         }
     }
 
-    fn default() -> NamespaceMap {
+    fn default_map() -> NamespaceMap {
         NamespaceMap {
             scope: {
                 let mut map = BTreeMap::new();
