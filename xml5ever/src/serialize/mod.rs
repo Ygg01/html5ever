@@ -22,20 +22,36 @@ use crate::util::{is_xml_char, is_name_start_char, is_name_char};
 type LocalPrefixMap = HashMap<Prefix, Namespace>;
 
 #[derive(Clone, Debug)]
-/// Struct that maps namespaces to a list of prefix maps.
+/// [Namespace Prefix Map](https://w3c.github.io/DOM-Parsing/#the-namespace-prefix-map)
+/// 
+/// As defined in W3C Editor's Draft. `NamespacePrefixMap`, associates
+/// unqiue key value that is either `Namespace` or `None` with an ordered list of associated prefix values.
+/// The `NamespacePrefixMap` will be populated by previosuly seen Namespaces#
+/// and all their previously encountered prefix associations for a given node and its ancestors.
+/// 
+/// Important preconditions: If the `NamespacePrefixMap` contains a namespace (or a None value), 
+/// the attached candidates list will not be empty. Also all missing value for prefix are replaced
+/// with prefix for empty string (e.g.`Prefix::from("")`).
 pub struct NamespacePrefixMap {
     map: BTreeMap<Option<Namespace>, Vec<Prefix>>,
 }
 
 impl NamespacePrefixMap {
+    /// Constructs a new empty `NamespacePrefixMap`
     pub fn new() -> NamespacePrefixMap {
         NamespacePrefixMap {
             map: BTreeMap::default(),
         }
     }
 
-    pub fn retrieve_preferred_prefix(&self, ns: Option<Namespace>, preferred_prefix: &Prefix) -> Option<&Prefix> {
-        if let Some(candidates_list) = self.map.get(&ns) {
+    /// Retrieves preferred prefix as per [specification](https://w3c.github.io/DOM-Parsing/#dfn-retrieving-a-preferred-prefix-string)
+    /// 
+    /// If for given namespace a candidates list exist, returns either `preferred_prefix` if found
+    /// or the last `Prefix` in candidates list.alloc
+    /// 
+    /// If for given namespace no candidates list exist, returns `None`.
+    pub fn retrieve_preferred_prefix(&self, ns: &Option<Namespace>, preferred_prefix: &Prefix) -> Option<&Prefix> {
+        if let Some(candidates_list) = self.map.get(ns) {
             // Since the candidates list will always contain at least one element, this
             // will never panic.
             let mut last_prefix = &candidates_list[0];
@@ -50,19 +66,31 @@ impl NamespacePrefixMap {
         None
     }
 
+    /// Finds a prefix as per [specification](https://w3c.github.io/DOM-Parsing/#dfn-found).
+    ///
+    /// If it finds any element for given namespace that matches given prefix, it will return
+    /// `true` for first prefix that matches given prefix.
+    ///
+    /// Otherwise returns `false`.
     pub fn find_prefix(&self, ns: &Option<Namespace>, prefix: &Prefix) -> bool {
         if let Some(candidates_list) = self.map.get(ns) {
             return candidates_list.iter().any(|pref| pref == prefix)
         }
         false
     }
-
-    pub fn add(&mut self, ns: &Option<Namespace>, prefix: &Prefix) {
+    /// Adds a prefix to namespace per [specification](https://w3c.github.io/DOM-Parsing/#dfn-add)
+    /// 
+    /// If there already is an ordered list associated with that `Namespace` key,
+    /// it adds the Prefix to the end of the list.
+    /// 
+    /// Otherwise it creates an empty `list`, adds `Prefix` to the end of that `list`, 
+    /// and inserts an entry with given `Namespace` as key, and `list` as value.
+    pub fn add(&mut self, ns: Option<Namespace>, prefix: Prefix) {
         if let Some(candidates_list) = self.map.get_mut(&ns) {
-            candidates_list.push(*prefix);
+            candidates_list.push(prefix);
         } else {
-            let candidate_list = vec![*prefix];
-            self.map.insert(*ns, candidate_list);
+            let candidate_list = vec![prefix];
+            self.map.insert(ns, candidate_list);
         }
     }
 
@@ -91,7 +119,7 @@ impl Default for SerializeOpts {
             context_namespace: None,
             prefix_map: {
                 let mut namesepace_map = NamespacePrefixMap::new();
-                namesepace_map.add(&Some(ns!(xml)), &namespace_prefix!("xml"));
+                namesepace_map.add(Some(ns!(xml)), namespace_prefix!("xml"));
                 namesepace_map
             },
             prefix_index: 1,
@@ -130,6 +158,14 @@ impl<Wr: Write> XmlSerializer<Wr> {
         }
     }
 
+    /// Writes given text into the Serializer, escaping it,
+    /// depending on where the text is written inside the tag or attribute value.
+    ///
+    /// For example
+    ///```text
+    ///    <tag>'&-quotes'</tag>   becomes      <tag>'&amp;-quotes'</tag>
+    ///    <tag = "'&-quotes'">    becomes      <tag = "&apos;&amp;-quotes&apos;"
+    ///```
     fn write_escaped_text(&mut self, text: &str) -> io::Result<()> {
         for c in text.chars() {
             match c {
@@ -150,6 +186,9 @@ impl<Wr: Write> XmlSerializer<Wr> {
     }
 
 
+    /// Recording namespace information as [per specification](https://w3c.github.io/DOM-Parsing/#recording-the-namespace).alloc
+    /// 
+    /// 
     fn recording_namespace_information<'a, AttrIter>(&self, 
             map: &mut NamespacePrefixMap,
             local_prefixes_map: &mut LocalPrefixMap,
@@ -184,7 +223,7 @@ impl<Wr: Write> XmlSerializer<Wr> {
                             continue;
                         }
 
-                        map.add(&namespace_definition, &prefix_definition);
+                        map.add(namespace_definition.clone(), prefix_definition.clone());
                         local_prefixes_map.insert(
                             prefix_definition,
                             namespace_definition.unwrap_or(ns!())
@@ -200,7 +239,7 @@ impl<Wr: Write> XmlSerializer<Wr> {
 impl<Wr: Write> Serializer for XmlSerializer<Wr> {
     
     // TODO
-    fn start_elem<'a, AttrIter>(&mut self, name: QualName, attrs: AttrIter) -> io::Result<()>
+    fn start_elem<'a, AttrIter>(&mut self, name: QualName, attrs: AttrIter, leaf_node: bool) -> io::Result<()>
     where
         AttrIter: Iterator<Item = AttrRef<'a>> {
         // 3.2.1.1 section 1

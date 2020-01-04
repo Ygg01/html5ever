@@ -44,7 +44,7 @@ pub trait Serialize {
 /// Types that are capable of serializing implement this trait
 pub trait Serializer {
     /// Serialize the start of an element, for example `<div class="test">`.
-    fn start_elem<'a, AttrIter>(&mut self, name: QualName, attrs: AttrIter) -> io::Result<()>
+    fn start_elem<'a, AttrIter>(&mut self, name: QualName, attrs: AttrIter, leaf_node: bool) -> io::Result<()>
     where
         AttrIter: Iterator<Item = AttrRef<'a>>;
 

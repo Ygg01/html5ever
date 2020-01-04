@@ -120,7 +120,7 @@ impl<Wr: Write> HtmlSerializer<Wr> {
 }
 
 impl<Wr: Write> Serializer for HtmlSerializer<Wr> {
-    fn start_elem<'a, AttrIter>(&mut self, name: QualName, attrs: AttrIter) -> io::Result<()>
+    fn start_elem<'a, AttrIter>(&mut self, name: QualName, attrs: AttrIter, _leaf_node: bool) -> io::Result<()>
     where
         AttrIter: Iterator<Item = AttrRef<'a>>,
     {
