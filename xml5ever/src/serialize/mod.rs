@@ -44,7 +44,7 @@ impl NamespacePrefixMap {
         }
     }
 
-    /// Retrieves preferred prefix as per [specification](https://w3c.github.io/DOM-Parsing/#dfn-retrieving-a-preferred-prefix-string)
+    /// [Retrieves preferred prefix](https://w3c.github.io/DOM-Parsing/#dfn-retrieving-a-preferred-prefix-string)
     /// 
     /// If for given namespace a candidates list exist, returns either `preferred_prefix` if found
     /// or the last `Prefix` in candidates list.alloc
@@ -66,7 +66,7 @@ impl NamespacePrefixMap {
         None
     }
 
-    /// Finds a prefix as per [specification](https://w3c.github.io/DOM-Parsing/#dfn-found).
+    /// [Finds a prefix](https://w3c.github.io/DOM-Parsing/#dfn-found).
     ///
     /// If it finds any element for given namespace that matches given prefix, it will return
     /// `true` for first prefix that matches given prefix.
@@ -78,7 +78,7 @@ impl NamespacePrefixMap {
         }
         false
     }
-    /// Adds a prefix to namespace per [specification](https://w3c.github.io/DOM-Parsing/#dfn-add)
+    /// [Adds a prefix to `NamespacePrefixMap`](https://w3c.github.io/DOM-Parsing/#dfn-add)
     /// 
     /// If there already is an ordered list associated with that `Namespace` key,
     /// it adds the Prefix to the end of the list.
@@ -94,6 +94,14 @@ impl NamespacePrefixMap {
         }
     }
 
+}
+
+fn map_opt_namespace(opt: &Option<Namespace>) -> Namespace {
+    opt.unwrap_or(ns!())
+}
+
+fn map_opt_prefix(opt: &Option<Prefix>) -> Prefix {
+    opt.unwrap_or(Prefix::from(""))
 }
 
 #[derive(Clone)]
@@ -146,6 +154,7 @@ where
 pub struct XmlSerializer<Wr> {
     writer: Wr,
     opts: SerializeOpts,
+    skip_end_tag: bool,
 }
 
 impl<Wr: Write> XmlSerializer<Wr> {
@@ -155,6 +164,7 @@ impl<Wr: Write> XmlSerializer<Wr> {
         XmlSerializer {
             writer: writer,
             opts: opts,
+            skip_end_tag: false,
         }
     }
 
@@ -186,9 +196,12 @@ impl<Wr: Write> XmlSerializer<Wr> {
     }
 
 
-    /// Recording namespace information as [per specification](https://w3c.github.io/DOM-Parsing/#recording-the-namespace).alloc
+    /// [Recording namespace information](https://w3c.github.io/DOM-Parsing/#recording-the-namespace)
     /// 
-    /// 
+    /// The following algorithm upadtes the `NamespacePrefixMap` with any found 
+    /// namespace prefix defintions, adds the found prefix definition to the 
+    /// local prefixes map and returns a local default namespace if there
+    /// is one.
     fn recording_namespace_information<'a, AttrIter>(&self, 
             map: &mut NamespacePrefixMap,
             local_prefixes_map: &mut LocalPrefixMap,
@@ -199,13 +212,13 @@ impl<Wr: Write> XmlSerializer<Wr> {
         let mut default_namespace_attr_value = None;
 
         for attr in attrs {
-            let attribute_namespace = attr.0.ns.clone();
-            let attribute_prefix = attr.0.prefix.clone();
+            let attribute_namespace = &attr.0.ns;
+            let attribute_prefix = &attr.0.prefix;
 
-            if attribute_namespace == ns!(xmlns) {
+            if attribute_namespace == &ns!(xmlns) {
                 match attribute_prefix {
                     None => default_namespace_attr_value = Some(Namespace::from(attr.1)),
-                    Some(prefix) => {
+                    Some(_prefix) => {
                         let prefix_definition = Prefix::from(&*attr.0.local);
                         let namespace_definition = attr.1;
 
@@ -226,7 +239,7 @@ impl<Wr: Write> XmlSerializer<Wr> {
                         map.add(namespace_definition.clone(), prefix_definition.clone());
                         local_prefixes_map.insert(
                             prefix_definition,
-                            namespace_definition.unwrap_or(ns!())
+                            map_opt_namespace(&namespace_definition),
                         );
                     },
                 }
@@ -242,7 +255,11 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
     fn start_elem<'a, AttrIter>(&mut self, name: QualName, attrs: AttrIter, leaf_node: bool) -> io::Result<()>
     where
         AttrIter: Iterator<Item = AttrRef<'a>> {
+
         // 3.2.1.1 section 1
+        // Check if required well-formed flag is set.
+        // If it is, check if local name contains `:` (U+003A COLON) or
+        // if local name doesn't with XML name rules.
         if self.opts.require_well_formed {
             if name.local.contains(":") {
                 return Err(Error::new(InvalidData, "Local name can't contain `:`."));
@@ -261,21 +278,43 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
                 }
             }
         }
-        self.writer.write_all(b"<");
-        let qualified_name = "";
-        let skip_end_tag = false;
-        let ignore_namespace_definition = false;
+        self.writer.write_all(b"<")?;
+
+        self.skip_end_tag = false;
+        let mut ignore_namespace_definition = false;
+
         let mut map = self.opts.prefix_map.clone();
         let mut local_prefixes_map = LocalPrefixMap::new();
         let local_default_namespace = self.recording_namespace_information(&mut map, &mut local_prefixes_map, attrs);
-
-        /*
         let inherited_ns = self.opts.context_namespace.clone();
         let ns = name.ns;
 
-        if inherited_ns == ns {
+        match inherited_ns {
+            // If inherited_ns is equal to ns
+            Some(inherited_ns) if inherited_ns == ns  =>{
+                if local_default_namespace.is_some() {
+                    ignore_namespace_definition = true;
+                }
+                // If ns is in the XML namespace 
+                // then append to qualified name "xm"
+                if ns == ns!(xml) {
+                    self.writer.write_all(b"xml:")?;
+                    self.writer.write_all(name.local.as_bytes())?;
+                } else {
+                    self.writer.write_all(name.local.as_bytes())?;
+                }
+            },
+            // Otherwise, inherited_ns is not equal to ns (the node's
+            // own namespace definition)
+            _ => {
+                let prefix = name.prefix;
+                let candidate_prefix = map.retrieve_preferred_prefix(&inherited_ns, &map_opt_prefix(&prefix));
 
-        }*/
+                
+            }
+        }
+
+
 
         self.writer.write_all(b">")
     }
@@ -329,176 +368,3 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
         self.writer.write_all(b"-->")
     }
 }
-/*
-#[derive(Debug)]
-struct NamespaceMapStack(Vec<NamespaceMap>);
-
-impl NamespaceMapStack {
-    fn new() -> NamespaceMapStack {
-        NamespaceMapStack(vec![])
-    }
-
-    fn push(&mut self, namespace: NamespaceMap) {
-        self.0.push(namespace);
-    }
-
-    fn pop(&mut self) {
-        self.0.pop();
-    }
-}
-
-/// Writes given text into the Serializer, escaping it,
-/// depending on where the text is written inside the tag or attribute value.
-///
-/// For example
-///```text
-///    <tag>'&-quotes'</tag>   becomes      <tag>'&amp;-quotes'</tag>
-///    <tag = "'&-quotes'">    becomes      <tag = "&apos;&amp;-quotes&apos;"
-///```
-fn write_to_buf_escaped<W: Write>(writer: &mut W, text: &str, attr_mode: bool) -> io::Result<()> {
-    for c in text.chars() {
-        match c {
-            '&' => writer.write_all(b"&amp;"),
-            '\'' if attr_mode => writer.write_all(b"&apos;"),
-            '"' if attr_mode => writer.write_all(b"&quot;"),
-            '<' if !attr_mode => writer.write_all(b"&lt;"),
-            '>' if !attr_mode => writer.write_all(b"&gt;"),
-            c => writer.write_fmt(format_args!("{}", c)),
-        }?;
-    }
-    Ok(())
-}
-
-#[inline]
-fn write_qual_name<W: Write>(writer: &mut W, name: &QualName) -> io::Result<()> {
-    if let Some(ref prefix) = name.prefix {
-        writer.write_all(&prefix.as_bytes())?;
-        writer.write_all(b":")?;
-        writer.write_all(&*name.local.as_bytes())?;
-    } else {
-        writer.write_all(&*name.local.as_bytes())?;
-    }
-
-    Ok(())
-}
-
-impl<Wr: Write> XmlSerializer<Wr> {
-    /// Creates a new Serializier from a writer and given serialization options.
-    pub fn new(writer: Wr) -> Self {
-        XmlSerializer {
-            writer: writer,
-            namespace_stack: NamespaceMapStack::new(),
-        }
-    }
-
-    #[inline(always)]
-    fn qual_name(&mut self, name: &QualName) -> io::Result<()> {
-        self.find_or_insert_ns(name);
-        write_qual_name(&mut self.writer, name)
-    }
-
-    #[inline(always)]
-    fn qual_attr_name(&mut self, name: &QualName) -> io::Result<()> {
-        self.find_or_insert_ns(name);
-        write_qual_name(&mut self.writer, name)
-    }
-
-    fn find_uri(&self, name: &QualName) -> bool {
-        let mut found = false;
-        for stack in self.namespace_stack.0.iter().rev() {
-            if let Some(&Some(ref el)) = stack.get(&name.prefix) {
-                found = *el == name.ns;
-                break;
-            }
-        }
-        found
-    }
-
-    fn find_or_insert_ns(&mut self, name: &QualName) {
-        if name.prefix.is_some() || &*name.ns != "" {
-            if !self.find_uri(name) {
-                if let Some(last_ns) = self.namespace_stack.0.last_mut() {
-                    last_ns.insert(name);
-                }
-            }
-        }
-    }
-}
-
-impl<Wr: Write> Serializer for XmlSerializer<Wr> {
-    /// Serializes given start element into text. Start element contains
-    /// qualified name and an attributes iterator.
-    fn start_elem<'a, AttrIter>(&mut self, name: QualName, attrs: AttrIter) -> io::Result<()>
-    where
-        AttrIter: Iterator<Item = AttrRef<'a>>,
-    {
-        self.namespace_stack.push(NamespaceMap::empty());
-
-        self.writer.write_all(b"<")?;
-        self.qual_name(&name)?;
-        if let Some(current_namespace) = self.namespace_stack.0.last() {
-            for (prefix, url_opt) in current_namespace.get_scope_iter() {
-                self.writer.write_all(b" xmlns")?;
-                if let &Some(ref p) = prefix {
-                    self.writer.write_all(b":")?;
-                    self.writer.write_all(&*p.as_bytes())?;
-                }
-
-                self.writer.write_all(b"=\"")?;
-                let url = if let &Some(ref a) = url_opt {
-                    a.as_bytes()
-                } else {
-                    b""
-                };
-                self.writer.write_all(url)?;
-                self.writer.write_all(b"\"")?;
-            }
-        }
-        for (name, value) in attrs {
-            self.writer.write_all(b" ")?;
-            self.qual_attr_name(&name)?;
-            self.writer.write_all(b"=\"")?;
-            write_to_buf_escaped(&mut self.writer, value, true)?;
-            self.writer.write_all(b"\"")?;
-        }
-        self.writer.write_all(b">")?;
-        Ok(())
-    }
-
-    /// Serializes given end element into text.
-    fn end_elem(&mut self, name: QualName) -> io::Result<()> {
-        self.namespace_stack.pop();
-        self.writer.write_all(b"</")?;
-        self.qual_name(&name)?;
-        self.writer.write_all(b">")
-    }
-
-    /// Serializes comment into text.
-    fn write_comment(&mut self, text: &str) -> io::Result<()> {
-        self.writer.write_all(b"<!--")?;
-        self.writer.write_all(text.as_bytes())?;
-        self.writer.write_all(b"-->")
-    }
-
-    /// Serializes given doctype
-    fn write_doctype(&mut self, name: &str) -> io::Result<()> {
-        self.writer.write_all(b"<!DOCTYPE ")?;
-        self.writer.write_all(name.as_bytes())?;
-        self.writer.write_all(b">")
-    }
-
-    /// Serializes text for a node or an attributes.
-    fn write_text(&mut self, text: &str) -> io::Result<()> {
-        write_to_buf_escaped(&mut self.writer, text, false)
-    }
-
-    /// Serializes given processing instruction.
-    fn write_processing_instruction(&mut self, target: &str, data: &str) -> io::Result<()> {
-        self.writer.write_all(b"<?")?;
-        self.writer.write_all(target.as_bytes())?;
-        self.writer.write_all(b" ")?;
-        self.writer.write_all(data.as_bytes())?;
-        self.writer.write_all(b"?>")
-    }
-}
-*/
