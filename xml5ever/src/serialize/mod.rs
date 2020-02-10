@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::io::{self, Write, Error};
 use std::io::ErrorKind::InvalidData;
 
-use markup5ever::{Namespace, Prefix};
+use markup5ever::{Namespace, Prefix, EqStr};
 use markup5ever::{namespace_prefix, namespace_url, ns};
 pub use markup5ever::serialize::{AttrRef, Serialize, Serializer, TraversalScope};
 
@@ -96,13 +96,15 @@ impl NamespacePrefixMap {
 
 }
 
-fn map_opt_namespace(opt: &Option<Namespace>) -> Namespace {
-    opt.unwrap_or(ns!())
+fn map_opt_atom<'a, T: From<&'a str> + Clone>(opt: &Option<T>) -> T {
+    if let Some(atom) = opt {
+        atom.clone()
+    } else {
+        T::from("")
+    }
 }
 
-fn map_opt_prefix(opt: &Option<Prefix>) -> Prefix {
-    opt.unwrap_or(Prefix::from(""))
-}
+
 
 #[derive(Clone)]
 /// Struct for setting serializer options.
@@ -215,7 +217,7 @@ impl<Wr: Write> XmlSerializer<Wr> {
             let attribute_namespace = &attr.0.ns;
             let attribute_prefix = &attr.0.prefix;
 
-            if attribute_namespace == &ns!(xmlns) {
+            if attribute_namespace.eq_str("xmlns") {
                 match attribute_prefix {
                     None => default_namespace_attr_value = Some(Namespace::from(attr.1)),
                     Some(_prefix) => {
@@ -239,7 +241,7 @@ impl<Wr: Write> XmlSerializer<Wr> {
                         map.add(namespace_definition.clone(), prefix_definition.clone());
                         local_prefixes_map.insert(
                             prefix_definition,
-                            map_opt_namespace(&namespace_definition),
+                            map_opt_atom(&namespace_definition),
                         );
                     },
                 }
@@ -256,7 +258,7 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
     where
         AttrIter: Iterator<Item = AttrRef<'a>> {
 
-        // 3.2.1.1 section 1
+        // 3.2.1.1 point 1
         // Check if required well-formed flag is set.
         // If it is, check if local name contains `:` (U+003A COLON) or
         // if local name doesn't with XML name rules.
@@ -278,25 +280,49 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
                 }
             }
         }
+        // 3.2.1.1 point 2
+        // Let markup be string "<"
         self.writer.write_all(b"<")?;
 
+        // 3.2.1.1 point 3
+        let qualified_name = String::new();
+
+        // 3.2.1.1 point 4
         self.skip_end_tag = false;
+
+        // 3.2.1.1 point 5
         let mut ignore_namespace_definition = false;
 
+        // 3.2.1.1 point 6
+        // Given prefix map, copy a namespace prefix map into map
         let mut map = self.opts.prefix_map.clone();
+
+        // 3.2.1.1 point 7
+        // Local prefix map is an empty map, with unique Node prefix strings as keys
+        // and corresponding namespaceURI Node values as the map's key values
         let mut local_prefixes_map = LocalPrefixMap::new();
+
+        // 3.2.1.1. point 8
         let local_default_namespace = self.recording_namespace_information(&mut map, &mut local_prefixes_map, attrs);
+
+        // 3.2.1.1. point 9
         let inherited_ns = self.opts.context_namespace.clone();
+
+        // 3.2.1.1. point 10
+        // let ns be the value of the node's namespaceURI attribute
         let ns = name.ns;
 
         match inherited_ns {
+            // 3.2.1.1. point 11
             // If inherited_ns is equal to ns
             Some(inherited_ns) if inherited_ns == ns  =>{
+                // if local default namespace is not null, then ignore namespace definition attribute
                 if local_default_namespace.is_some() {
                     ignore_namespace_definition = true;
                 }
                 // If ns is in the XML namespace 
-                // then append to qualified name "xm"
+                // then append to qualified name "xml"
+                // else append node's local name, node prefix is dropped.
                 if ns == ns!(xml) {
                     self.writer.write_all(b"xml:")?;
                     self.writer.write_all(name.local.as_bytes())?;
@@ -304,13 +330,19 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
                     self.writer.write_all(name.local.as_bytes())?;
                 }
             },
+             // 3.2.1.1. point 12
             // Otherwise, inherited_ns is not equal to ns (the node's
             // own namespace definition)
             _ => {
                 let prefix = name.prefix;
-                let candidate_prefix = map.retrieve_preferred_prefix(&inherited_ns, &map_opt_prefix(&prefix));
+                let candidate_prefix = map.retrieve_preferred_prefix(&inherited_ns, &map_opt_atom(&prefix));
 
-                
+                if prefix.eq_str("xmlns") {
+                    if self.opts.require_well_formed {
+                        return Err(Error::new(InvalidData, format!("An Element with prefix 'xmlns' will not legally round-trip in a conforming XML parser. ")));
+                    }
+                }
+                //TODO
             }
         }
 

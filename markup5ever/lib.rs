@@ -44,3 +44,24 @@ mod util {
 pub use interface::{Attribute, ExpandedName, QualName};
 pub use util::smallcharset::SmallCharSet;
 pub use util::*;
+
+use string_cache::{Atom, StaticAtomSet};
+
+pub trait EqStr {
+    fn eq_str(&self, other: &str) -> bool;
+}
+
+impl<T: StaticAtomSet> EqStr for Atom<T> {
+    fn eq_str(&self, other: &str) -> bool {
+        self.as_ref() == other
+    }
+}
+
+impl<T: StaticAtomSet>  EqStr for Option<Atom<T>> {
+    fn eq_str(&self, other: &str) -> bool {
+        match self {
+            Some(ref atom) if atom == other => true,
+            _ => false,
+        }
+    }
+}
