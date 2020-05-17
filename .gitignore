@@ -4,3 +4,4 @@ Cargo.lock
 *.racertmp
 **/.idea
 **/.DS_Store
+.vscode/*

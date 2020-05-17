@@ -468,9 +468,11 @@ impl Serialize for SerializableHandle {
                         ref attrs,
                         ..
                     } => {
+                        let no_children = !handle.children.borrow().is_empty();
                         serializer.start_elem(
                             name.clone(),
                             attrs.borrow().iter().map(|at| (&at.name, &at.value[..])),
+                            no_children,
                         )?;
 
                         ops.insert(0, SerializeOp::Close(name.clone()));
