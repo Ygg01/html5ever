@@ -14,7 +14,7 @@ use std::io::{self, Error, Write};
 
 pub use markup5ever::serialize::{AttrRef, Serialize, Serializer, TraversalScope};
 use markup5ever::{namespace_prefix, namespace_url, ns};
-use markup5ever::{EqStr, Namespace, Prefix, LocalName};
+use markup5ever::{EqStr, LocalName, Namespace, Prefix};
 
 use crate::util::{is_name_char, is_name_start_char, is_xml_char};
 use crate::QualName;
@@ -34,6 +34,18 @@ type LocalPrefixMap = HashMap<Prefix, Namespace>;
 /// with prefix for empty string (e.g.`Prefix::from("")`).
 pub struct NamespacePrefixMap {
     map: BTreeMap<Option<Namespace>, Vec<Prefix>>,
+}
+
+impl Default for NamespacePrefixMap {
+    fn default() -> Self {
+        NamespacePrefixMap {
+            map: {
+                namespace_map = BTreeMap::default();
+                namespace_map.add(Some(ns!(xml)), namespace_prefix!("xml"));
+                namespace_map
+            },
+        }
+    }
 }
 
 impl NamespacePrefixMap {
@@ -118,6 +130,17 @@ fn opt_eq<T: PartialEq>(opt: &Option<T>, cmp: &T) -> bool {
     }
 }
 
+/// Check that all chars in string match function.
+/// Exits early on first wrong character spotted
+fn matches_rules(haystack: &str, needle_fn: fn(char) -> bool) -> bool {
+    for c in haystack.chars() {
+        if !needle_fn(c) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Function for [generating a namespace prefixes](https://w3c.github.io/DOM-Parsing/#dfn-generating-a-prefix)
 ///
 /// Generates a prefix given a namespace prefix map - map, a string new_namespace and a reference
@@ -154,11 +177,7 @@ impl Default for SerializeOpts {
             traversal_scope: TraversalScope::ChildrenOnly(None),
             require_well_formed: true,
             context_namespace: None,
-            prefix_map: {
-                let mut namesepace_map = NamespacePrefixMap::new();
-                namesepace_map.add(Some(ns!(xml)), namespace_prefix!("xml"));
-                namesepace_map
-            },
+            prefix_map: NamespacePrefixMap::default(),
             prefix_index: 1,
         }
     }
@@ -175,6 +194,11 @@ where
     node.serialize(&mut ser, traversal_scope)
 }
 
+struct ElemInfo {
+    skip_end_tag: bool,
+    qualified_name: String,
+}
+
 /// Struct used for serializing nodes into a text that other XML
 /// parses can read.
 ///
@@ -184,15 +208,17 @@ pub struct XmlSerializer<Wr> {
     writer: Wr,
     opts: SerializeOpts,
     skip_end_tag: bool,
+    stack: Vec<ElemInfo>,
 }
 
 impl<Wr: Write> XmlSerializer<Wr> {
     /// Creates a new Serializier from a writer and given serialization options.
     pub fn new(writer: Wr, opts: SerializeOpts) -> Self {
         XmlSerializer {
-            writer: writer,
-            opts: opts,
+            writer,
+            opts,
             skip_end_tag: false,
+            stack: Vec::new(),
         }
     }
 
@@ -255,7 +281,7 @@ impl<Wr: Write> XmlSerializer<Wr> {
 
     /// [Recording namespace information](https://w3c.github.io/DOM-Parsing/#recording-the-namespace)
     ///
-    /// The following algorithm updates the `NamespacePrefixMap` with any found
+    /// The following function updates the `NamespacePrefixMap` with any found
     /// namespace prefix definitions, adds the found prefix definition to the
     /// local prefixes map and returns a local default namespace if there
     /// is one.
@@ -302,44 +328,126 @@ impl<Wr: Write> XmlSerializer<Wr> {
         default_namespace_attr_value
     }
 
-    fn serialize_node_attrs(
+    /// [Serializing an Element's attributes](https://w3c.github.io/DOM-Parsing/#serializing-an-element-s-attributes)
+    ///
+    /// The following function performs XML serialization of the Element's attributes
+    /// for a given `elem` represented by name `QualName` and a list of XML `attributes`
+    /// as well as a `NamespacePrefixMap` map, `LocalPrefixMap`, and `ignore_namespace_definition` flag.
+    fn serialize_elem_attrs(
         &mut self,
         elem: QualName,
         attributes: Vec<AttrRef>,
-        map: NamespacePrefixMap,
+        map: &mut NamespacePrefixMap,
         local_prefixes_map: LocalPrefixMap,
         ignore_namespace_definition: bool,
     ) -> io::Result<()> {
-        // TODO implementation
         let mut result = String::new();
-        let mut local_name_set: HashSet<(&Namespace, &LocalName)> = HashSet::new();
+        let mut localname_set: HashSet<(&Namespace, &LocalName)> = HashSet::new();
 
         for attr in attributes {
             let tuple = (&attr.0.ns, &attr.0.local);
-            if self.opts.require_well_formed && local_name_set.contains(&tuple) {
-                return Err(Error::new (
+            if self.opts.require_well_formed && localname_set.contains(&tuple) {
+                return Err(Error::new(
                     InvalidData,
-                    format!("Serialization of attribute {:?} would fail to produce a well-formed element ", tuple)
+                    format!("Serialization of attribute {:?} would fail to produce a well-formed element ", tuple),
                 ));
             }
-            local_name_set.insert(tuple);
+            // Create a new tuple and add it to localname set.
+            localname_set.insert(tuple);
             let attribute_namespace = &attr.0.ns;
-            let candidate_prefix = &attr.0.prefix;
+            let mut candidate_prefix = None;
 
-            if attr.0.ns != ns!() {
-                let opt = Some(attr.0.ns.clone());
-                let candidate_prefix = map.retrieve_preferred_prefix(
-                    &Some(attr.0.ns.clone()), 
-                    attr.0.prefix.as_ref().unwrap_or(&Prefix::from(""))
-                );
+            // If attribute space is not null (i.e. empty)
+            if attribute_namespace != &ns!() {
+                let search_prefix = attr.0.prefix.as_ref().unwrap_or(&Prefix::from(""));
+                candidate_prefix =
+                    map.retrieve_preferred_prefix(&Some(attr.0.ns.clone()), search_prefix);
+
+                if attribute_namespace == &ns!(xmlns) {
+                    let redeclare_xml_namespace = Namespace::from(attr.1) == ns!(xml);
+                    let ignored_ns_def = ignore_namespace_definition && attr.0.prefix.is_none();
+                    let redefine_namespace = match &attr.0.prefix {
+                        Some(prefix) => {
+                            let local_name = Prefix::from(&attr.0.local);
+                            let ns_attr_value = Some(Namespace::from(&attr.1));
+                            let found_in_local = local_prefixes_map.get(&local_name);
+                            let previously_defined = self
+                                .opts
+                                .prefix_map
+                                .find_prefix(&ns_attr_value, &local_name);
+
+                            let attr_local_not_in_local_pref_map = found_in_local.is_none();
+                            let attr_local_in_already =
+                                found_in_local.is_some() && found_in_local.ne(&ns_attr_value);
+
+                            (attr_local_in_already || attr_local_not_in_local_pref_map)
+                                && previously_defined
+                        }
+                        _ => false,
+                    };
+
+                    if redeclare_xml_namespace || ignored_ns_def || redefine_namespace {
+                        continue;
+                    }
+
+                    if self.opts.require_well_formed {
+                        let attr_value = Namespace::from(&attr.1);
+                        if attr_value == ns!(xmlns) {
+                            return Err(Error::new(
+                                InvalidData,
+                                format!("Creation of XMLNS namespace(`{:?}`) is allowed only under strict qualifications", attr.1),
+                            ));
+                        }
+                        if attr_value == ns!() {
+                            return Err(Error::new(
+                                InvalidData,
+                                "Namespace declarations can't be used to undeclare a namespace (use default namespace instead)",
+                            ));
+                        }
+                    }
+
+                    candidate_prefix = Some(&Prefix::from("xmlns"));
+                } else {
+                    // Otherwise the attribute namespace is not the XMLNS namespace
+                    candidate_prefix =
+                        Some(&generate_prefix(map, attribute_namespace, &mut self.opts));
+                    self.writer.write_all(b" xmlns:")?;
+                    self.writer.write_all(candidate_prefix?.as_bytes())?;
+                    self.writer.write_all(b"=\"")?;
+                    self.serialize_attr_value(&attr.1)?;
+                    self.writer.write_all(b"\"")?;
+                }
             }
+
+            self.writer.write_all(b" ")?;
+
+            if let Some(candidate_prefix) = candidate_prefix {
+                self.writer.write_all(candidate_prefix.as_bytes())?;
+                self.writer.write_all(b":")?;
+            }
+
+            if self.opts.require_well_formed {
+                if attr.0.local.contains(":")
+                    || !matches_rules(attr.0.local.as_ref(), is_xml_char)
+                    || (attr.0.local.eq("xmlns") && attr.0.ns.eq(""))
+                {
+                    return Err(Error::new(
+                        InvalidData,
+                        format!("Serialization of attribute {:?} would fail to produce a well-formed element ", tuple),
+                    ));
+                }
+            }
+
+            self.writer.write_all(attr.0.local.as_bytes())?;
+            self.writer.write_all(b"=\"")?;
+            self.serialize_attr_value(&attr.1)?;
+            self.writer.write_all(b"\"")?;
         }
         Ok(())
     }
 }
 
 impl<Wr: Write> Serializer for XmlSerializer<Wr> {
-    // TODO
     fn start_elem<'a, AttrIter>(
         &mut self,
         name: QualName,
@@ -489,7 +597,7 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
                     ignore_namespace_definition = true;
 
                     self.writer.write_all(name.local.as_bytes())?;
-                    inherited_ns = Some(Namespace::from(&ns));
+                    inherited_ns = Some(ns);
                     //TODO fix qualified name handling
                     self.writer.write_all(qualified_name.as_bytes())?;
                     self.writer.write_all(b" xmlns=\"")?;
@@ -499,20 +607,96 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
             }
         }
         // 3.2.1.1. point 13
-        self.serialize_node_attrs(
+        self.serialize_elem_attrs(
             name,
             attributes,
-            map,
+            &mut map,
             local_prefixes_map,
             ignore_namespace_definition,
         )?;
 
-        self.writer.write_all(b">")
+        let ignore_children = ns == ns!(html)
+            && leaf_node
+            && match name.local {
+                local_name!("area")
+                | local_name!("base")
+                | local_name!("basefont")
+                | local_name!("bgsound")
+                | local_name!("br")
+                | local_name!("col")
+                | local_name!("embed")
+                | local_name!("frame")
+                | local_name!("hr")
+                | local_name!("img")
+                | local_name!("input")
+                | local_name!("keygen")
+                | local_name!("link")
+                | local_name!("meta")
+                | local_name!("param")
+                | local_name!("source")
+                | local_name!("track")
+                | local_name!("wbr") => true,
+                _ => false,
+            };
+        let empty_node = ns != ns!(html) && leaf_node;
+
+        // 3.2.1.1. point 14
+        if ignore_children {
+            if VOID_ELEMENTS.contains(&name.local.as_ref()) {
+                self.writer.write_all(b" /")?;
+                self.skip_end_tag = true;
+            }
+
+        // 3.2.1.1. point 15
+        } else if empty_node {
+            self.writer.write_all(b"/")?;
+            self.skip_end_tag = true;
+        }
+
+        self.writer.write_all(b">")?;
+
+        self.stack.push(ElemInfo {
+            skip_end_tag: self.skip_end_tag,
+            qualified_name: String,
+        });
+
+        // 3.2.1.1. point 18
+        // TODO
+
+        // 3.2.1.1. point 19
+        // TODO
+
+        Ok(())
     }
 
     // TODO
     fn end_elem(&mut self, name: QualName) -> io::Result<()> {
+        // 3.2.1.1. point 20
+        self.writer.write_all(b"</")?;
+        self.writer.write_all(self.qualified_name.as_bytes())?;
+        self.writer.write_all(b">")?;
+
         Ok(())
+    }
+
+    fn write_text(&mut self, text: &str) -> io::Result<()> {
+        self.write_escaped_text(text)
+    }
+
+    fn write_comment(&mut self, text: &str) -> io::Result<()> {
+        if self.opts.require_well_formed {
+            if text.contains("--") {
+                return Err(Error::new(
+                    InvalidData,
+                    "Comment contains double minus `--`",
+                ));
+            } else if text.ends_with("-") {
+                return Err(Error::new(InvalidData, "Comment ends with minus"));
+            }
+        }
+        self.writer.write_all(b"<!--")?;
+        self.write_escaped_text(text)?;
+        self.writer.write_all(b"-->")
     }
 
     // TODO Until DTD is fully implemented
@@ -520,10 +704,6 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
         self.writer.write_all(b"<!DOCTYPE ")?;
         self.writer.write_all(text.as_bytes())?;
         self.writer.write_all(b"!>")
-    }
-
-    fn write_text(&mut self, text: &str) -> io::Result<()> {
-        self.write_escaped_text(text)
     }
 
     fn write_processing_instruction(&mut self, target: &str, data: &str) -> io::Result<()> {
@@ -552,21 +732,5 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
         self.writer.write_all(b" ")?;
         self.write_escaped_text(data)?;
         self.writer.write_all(b"?>")
-    }
-
-    fn write_comment(&mut self, text: &str) -> io::Result<()> {
-        if self.opts.require_well_formed {
-            if text.contains("--") {
-                return Err(Error::new(
-                    InvalidData,
-                    "Comment contains double minus `--`",
-                ));
-            } else if text.ends_with("-") {
-                return Err(Error::new(InvalidData, "Comment ends with minus"));
-            }
-        }
-        self.writer.write_all(b"<!--")?;
-        self.write_escaped_text(text)?;
-        self.writer.write_all(b"-->")
     }
 }
