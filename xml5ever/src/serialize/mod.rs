@@ -12,8 +12,9 @@ use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind::InvalidData;
 use std::io::{self, Error, Write};
 
+use log::warn;
 pub use markup5ever::serialize::{AttrRef, Serialize, Serializer, TraversalScope};
-use markup5ever::{namespace_prefix, namespace_url, ns};
+use markup5ever::{is_void_element, local_name, namespace_prefix, namespace_url, ns};
 use markup5ever::{EqStr, LocalName, Namespace, Prefix};
 
 use crate::util::{is_name_char, is_name_start_char, is_xml_char};
@@ -40,8 +41,8 @@ impl Default for NamespacePrefixMap {
     fn default() -> Self {
         NamespacePrefixMap {
             map: {
-                namespace_map = BTreeMap::default();
-                namespace_map.add(Some(ns!(xml)), namespace_prefix!("xml"));
+                let mut namespace_map = BTreeMap::default();
+                namespace_map.insert(Some(ns!(xml)), vec![namespace_prefix!("xml")]);
                 namespace_map
             },
         }
@@ -66,7 +67,7 @@ impl NamespacePrefixMap {
         &self,
         ns: &Option<Namespace>,
         preferred_prefix: &Prefix,
-    ) -> Option<&Prefix> {
+    ) -> Option<Prefix> {
         if let Some(candidates_list) = self.map.get(ns) {
             // Since the candidates list will always contain at least one element, this
             // will never panic.
@@ -77,7 +78,7 @@ impl NamespacePrefixMap {
                     break;
                 }
             }
-            return Some(last_prefix);
+            return Some(last_prefix.clone());
         }
         None
     }
@@ -197,6 +198,15 @@ where
 struct ElemInfo {
     skip_end_tag: bool,
     qualified_name: String,
+}
+
+impl Default for ElemInfo {
+    fn default() -> Self {
+        ElemInfo {
+            skip_end_tag: false,
+            qualified_name: String::new(),
+        }
+    }
 }
 
 /// Struct used for serializing nodes into a text that other XML
@@ -335,13 +345,11 @@ impl<Wr: Write> XmlSerializer<Wr> {
     /// as well as a `NamespacePrefixMap` map, `LocalPrefixMap`, and `ignore_namespace_definition` flag.
     fn serialize_elem_attrs(
         &mut self,
-        elem: QualName,
         attributes: Vec<AttrRef>,
         map: &mut NamespacePrefixMap,
         local_prefixes_map: LocalPrefixMap,
         ignore_namespace_definition: bool,
     ) -> io::Result<()> {
-        let mut result = String::new();
         let mut localname_set: HashSet<(&Namespace, &LocalName)> = HashSet::new();
 
         for attr in attributes {
@@ -359,17 +367,20 @@ impl<Wr: Write> XmlSerializer<Wr> {
 
             // If attribute space is not null (i.e. empty)
             if attribute_namespace != &ns!() {
-                let search_prefix = attr.0.prefix.as_ref().unwrap_or(&Prefix::from(""));
+                let search_prefix = match &attr.0.prefix {
+                    Some(t) => t.clone(),
+                    _ => Prefix::from(""),
+                };
                 candidate_prefix =
-                    map.retrieve_preferred_prefix(&Some(attr.0.ns.clone()), search_prefix);
+                    map.retrieve_preferred_prefix(&Some(attr.0.ns.clone()), &search_prefix);
 
                 if attribute_namespace == &ns!(xmlns) {
                     let redeclare_xml_namespace = Namespace::from(attr.1) == ns!(xml);
                     let ignored_ns_def = ignore_namespace_definition && attr.0.prefix.is_none();
                     let redefine_namespace = match &attr.0.prefix {
                         Some(prefix) => {
-                            let local_name = Prefix::from(&attr.0.local);
-                            let ns_attr_value = Some(Namespace::from(&attr.1));
+                            let local_name = Prefix::from(&*attr.0.local);
+                            let ns_attr_value = Some(Namespace::from(&*attr.1));
                             let found_in_local = local_prefixes_map.get(&local_name);
                             let previously_defined = self
                                 .opts
@@ -377,8 +388,8 @@ impl<Wr: Write> XmlSerializer<Wr> {
                                 .find_prefix(&ns_attr_value, &local_name);
 
                             let attr_local_not_in_local_pref_map = found_in_local.is_none();
-                            let attr_local_in_already =
-                                found_in_local.is_some() && found_in_local.ne(&ns_attr_value);
+                            let attr_local_in_already = found_in_local.is_some()
+                                && found_in_local.cloned().ne(&ns_attr_value);
 
                             (attr_local_in_already || attr_local_not_in_local_pref_map)
                                 && previously_defined
@@ -391,7 +402,7 @@ impl<Wr: Write> XmlSerializer<Wr> {
                     }
 
                     if self.opts.require_well_formed {
-                        let attr_value = Namespace::from(&attr.1);
+                        let attr_value = Namespace::from(&*attr.1);
                         if attr_value == ns!(xmlns) {
                             return Err(Error::new(
                                 InvalidData,
@@ -406,13 +417,14 @@ impl<Wr: Write> XmlSerializer<Wr> {
                         }
                     }
 
-                    candidate_prefix = Some(&Prefix::from("xmlns"));
+                    candidate_prefix = Some(namespace_prefix!("xmlns"));
                 } else {
                     // Otherwise the attribute namespace is not the XMLNS namespace
-                    candidate_prefix =
-                        Some(&generate_prefix(map, attribute_namespace, &mut self.opts));
+                    let generated_prefix =
+                        Some(generate_prefix(map, attribute_namespace, &mut self.opts));
                     self.writer.write_all(b" xmlns:")?;
-                    self.writer.write_all(candidate_prefix?.as_bytes())?;
+                    self.writer
+                        .write_all(generated_prefix.unwrap().as_bytes())?;
                     self.writer.write_all(b"=\"")?;
                     self.serialize_attr_value(&attr.1)?;
                     self.writer.write_all(b"\"")?;
@@ -550,7 +562,7 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
                     if self.opts.require_well_formed {
                         return Err(Error::new(InvalidData, format!("An Element with prefix 'xmlns' will not legally round-trip in a conforming XML parser. ")));
                     }
-                    candidate_prefix = prefix.as_ref();
+                    candidate_prefix = prefix.clone();
                 }
                 // Found a suitable namespace prefix
                 if let Some(candidate_prefix) = candidate_prefix {
@@ -597,7 +609,7 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
                     ignore_namespace_definition = true;
 
                     self.writer.write_all(name.local.as_bytes())?;
-                    inherited_ns = Some(ns);
+                    inherited_ns = Some(ns.clone());
                     //TODO fix qualified name handling
                     self.writer.write_all(qualified_name.as_bytes())?;
                     self.writer.write_all(b" xmlns=\"")?;
@@ -608,72 +620,58 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
         }
         // 3.2.1.1. point 13
         self.serialize_elem_attrs(
-            name,
             attributes,
             &mut map,
             local_prefixes_map,
             ignore_namespace_definition,
         )?;
 
-        let ignore_children = ns == ns!(html)
-            && leaf_node
-            && match name.local {
-                local_name!("area")
-                | local_name!("base")
-                | local_name!("basefont")
-                | local_name!("bgsound")
-                | local_name!("br")
-                | local_name!("col")
-                | local_name!("embed")
-                | local_name!("frame")
-                | local_name!("hr")
-                | local_name!("img")
-                | local_name!("input")
-                | local_name!("keygen")
-                | local_name!("link")
-                | local_name!("meta")
-                | local_name!("param")
-                | local_name!("source")
-                | local_name!("track")
-                | local_name!("wbr") => true,
-                _ => false,
-            };
+        let ignore_children = ns == ns!(html) && leaf_node && is_void_element(&name.local);
         let empty_node = ns != ns!(html) && leaf_node;
 
         // 3.2.1.1. point 14
         if ignore_children {
-            if VOID_ELEMENTS.contains(&name.local.as_ref()) {
-                self.writer.write_all(b" /")?;
-                self.skip_end_tag = true;
-            }
-
-        // 3.2.1.1. point 15
-        } else if empty_node {
-            self.writer.write_all(b"/")?;
+            self.writer.write_all(b" /")?;
             self.skip_end_tag = true;
         }
+        // 3.2.1.1. point 15
+        else if empty_node {
+            self.writer.write_all(b"/")?;
+        }
 
+        // 3.2.1.1. point 16
         self.writer.write_all(b">")?;
 
         self.stack.push(ElemInfo {
             skip_end_tag: self.skip_end_tag,
-            qualified_name: String,
+            qualified_name,
         });
-
-        // 3.2.1.1. point 18
-        // TODO
-
-        // 3.2.1.1. point 19
-        // TODO
 
         Ok(())
     }
 
-    // TODO
     fn end_elem(&mut self, name: QualName) -> io::Result<()> {
+        let info = match self.stack.pop() {
+            Some(info) => info,
+            None => {
+                warn!("missing ElemInfo, creating default.");
+                Default::default()
+            }
+        };
+
+        // 3.2.1.1. point 17
+        if info.skip_end_tag {
+            return Ok(());
+        }
+
+        // 3.2.1.1. point 18
+        if name.ns == ns!(html) && name.local == local_name!("template") {
+            // TODO DocumentFragment serialization
+        }
+
         // 3.2.1.1. point 20
         self.writer.write_all(b"</")?;
-        self.writer.write_all(self.qualified_name.as_bytes())?;
+        self.writer.write_all(info.qualified_name.as_bytes())?;
         self.writer.write_all(b">")?;
 
         Ok(())

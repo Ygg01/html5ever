@@ -57,11 +57,35 @@ impl<T: StaticAtomSet> EqStr for Atom<T> {
     }
 }
 
-impl<T: StaticAtomSet>  EqStr for Option<Atom<T>> {
+impl<T: StaticAtomSet> EqStr for Option<Atom<T>> {
     fn eq_str(&self, other: &str) -> bool {
         match self {
             Some(ref atom) if atom == other => true,
             _ => false,
         }
+    }
+}
+
+pub fn is_void_element(local: &LocalName) -> bool {
+    match *local {
+        local_name!("area")
+        | local_name!("base")
+        | local_name!("basefont")
+        | local_name!("bgsound")
+        | local_name!("br")
+        | local_name!("col")
+        | local_name!("embed")
+        | local_name!("frame")
+        | local_name!("hr")
+        | local_name!("img")
+        | local_name!("input")
+        | local_name!("keygen")
+        | local_name!("link")
+        | local_name!("meta")
+        | local_name!("param")
+        | local_name!("source")
+        | local_name!("track")
+        | local_name!("wbr") => true,
+        _ => false,
     }
 }
