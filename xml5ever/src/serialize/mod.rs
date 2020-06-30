@@ -9,6 +9,7 @@
 
 use std::collections::btree_map::BTreeMap;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as FmtWrite;
 use std::io::ErrorKind::InvalidData;
 use std::io::{self, Error, Write};
 
@@ -140,6 +141,10 @@ fn matches_rules(haystack: &str, needle_fn: fn(char) -> bool) -> bool {
         }
     }
     true
+}
+
+fn convert_fmt_to_io_error(_err: std::fmt::Error) -> std::io::Error {
+    Error::new(InvalidData, format!("Error writing to string"))
 }
 
 /// Function for [generating a namespace prefixes](https://w3c.github.io/DOM-Parsing/#dfn-generating-a-prefix)
@@ -504,7 +509,7 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
         self.writer.write_all(b"<")?;
 
         // 3.2.1.1 point 3
-        let qualified_name = String::new();
+        let mut qualified_name = String::new();
 
         // 3.2.1.1 point 4
         self.skip_end_tag = false;
@@ -544,15 +549,15 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
                 // then append to qualified name "xml"
                 // else append node's local name, node prefix is dropped.
                 if ns == ns!(xml) {
-                    self.writer.write_all(b"xml:")?;
-                    self.writer.write_all(name.local.as_bytes())?;
+                    write!(qualified_name, "xml:{}", &name.local)
+                        .map_err(convert_fmt_to_io_error)?;
                 } else {
-                    self.writer.write_all(name.local.as_bytes())?;
+                    write!(qualified_name, "{}", &name.local).map_err(convert_fmt_to_io_error)?;
                 }
+                self.writer.write_all(qualified_name.as_bytes())?;
             }
             // 3.2.1.1. point 12
             // Otherwise, inherited_ns is not equal to ns (the node's
-            // own namespace definition)
             _ => {
                 let mut prefix = name.prefix.clone();
                 let mut candidate_prefix =
@@ -567,9 +572,9 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
                 // Found a suitable namespace prefix
                 if let Some(candidate_prefix) = candidate_prefix {
                     // Append the candidate prefix, ':' and node's local name.
-                    self.writer.write_all(candidate_prefix.as_bytes())?;
-                    self.writer.write_all(b":")?;
-                    self.writer.write_all(name.local.as_bytes())?;
+                    write!(qualified_name, "{}:{}", candidate_prefix, name.local)
+                        .map_err(convert_fmt_to_io_error)?;
+                    self.writer.write_all(qualified_name.as_bytes())?;
 
                     if let Some(ref local_default_namespace) = local_default_namespace {
                         if local_default_namespace == &ns!() {
@@ -588,9 +593,11 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
                     }
 
                     map.add(Some(ns.clone()), some_prefix.clone());
-                    self.writer.write_all(some_prefix.as_bytes())?;
-                    self.writer.write_all(b":")?;
-                    self.writer.write_all(name.local.as_bytes())?;
+
+                    write!(qualified_name, "{}:{}", some_prefix, name.local)
+                        .map_err(convert_fmt_to_io_error)?;
+                    self.writer.write_all(qualified_name.as_bytes())?;
+
                     self.writer.write_all(b" xmlns:")?;
                     self.writer.write_all(some_prefix.as_bytes())?;
                     self.writer.write_all(b"=\"")?;
@@ -608,13 +615,20 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
                 {
                     ignore_namespace_definition = true;
 
-                    self.writer.write_all(name.local.as_bytes())?;
+                    write!(qualified_name, "{}", name.local).map_err(convert_fmt_to_io_error)?;
+
                     inherited_ns = Some(ns.clone());
-                    //TODO fix qualified name handling
+
                     self.writer.write_all(qualified_name.as_bytes())?;
                     self.writer.write_all(b" xmlns=\"")?;
                     self.serialize_attr_value(&ns)?;
                     self.writer.write_all(b"\"")?;
+                }
+                // Node has local default namespace that matches ns
+                else if opt_eq(&local_default_namespace, &ns) {
+                    write!(qualified_name, "{}", name.local).map_err(convert_fmt_to_io_error)?;
+                    inherited_ns = Some(ns.clone());
+                    self.writer.write_all(qualified_name.as_bytes())?;
                 }
             }
         }
@@ -643,7 +657,7 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
         self.writer.write_all(b">")?;
 
         self.stack.push(ElemInfo {
-            skip_end_tag: self.skip_end_tag,
+            skip_end_tag,
             qualified_name,
         });
 
