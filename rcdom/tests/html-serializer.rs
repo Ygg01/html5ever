@@ -46,17 +46,18 @@ impl Serialize for Tokens {
                         TagKind::StartTag => serializer.start_elem(
                             name,
                             tag.attrs.iter().map(|at| (&at.name, &at.value[..])),
+                            false,
                         )?,
                         TagKind::EndTag => serializer.end_elem(name)?,
                     }
-                },
+                }
                 &Token::DoctypeToken(ref dt) => match dt.name {
                     Some(ref name) => serializer.write_doctype(&name)?,
-                    None => {},
+                    None => {}
                 },
                 &Token::CommentToken(ref chars) => serializer.write_comment(&chars)?,
                 &Token::CharacterTokens(ref chars) => serializer.write_text(&chars)?,
-                &Token::NullCharacterToken | &Token::EOFToken => {},
+                &Token::NullCharacterToken | &Token::EOFToken => {}
                 &Token::ParseError(ref e) => println!("parse error: {:#?}", e),
             }
         }

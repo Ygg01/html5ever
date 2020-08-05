@@ -96,18 +96,6 @@ impl NamespaceMap {
         }
     }
 
-    fn default_map() -> NamespaceMap {
-        NamespaceMap {
-            scope: {
-                let mut map = BTreeMap::new();
-                map.insert(None, None);
-                map.insert(Some(namespace_prefix!("xml")), Some(ns!(xml)));
-                map.insert(Some(namespace_prefix!("xmlns")), Some(ns!(xmlns)));
-                map
-            },
-        }
-    }
-
     #[doc(hidden)]
     pub fn get(&self, prefix: &Option<Prefix>) -> Option<&Option<Namespace>> {
         self.scope.get(prefix)

@@ -184,7 +184,7 @@ fn append_to_existing_text(prev: &Handle, text: &str) -> bool {
         NodeData::Text { ref contents } => {
             contents.borrow_mut().push_slice(text);
             true
-        },
+        }
         _ => false,
     }
 }
@@ -288,7 +288,7 @@ impl TreeSink for RcDom {
                     if append_to_existing_text(h, &text) {
                         return;
                     }
-                },
+                }
                 _ => (),
             },
             _ => (),
@@ -325,7 +325,7 @@ impl TreeSink for RcDom {
                 Node::new(NodeData::Text {
                     contents: RefCell::new(text),
                 })
-            },
+            }
 
             // The tree builder promises we won't have a text node after
             // the insertion point.
@@ -430,7 +430,7 @@ impl Default for RcDom {
         }
     }
 }
-
+#[derive(Debug)]
 enum SerializeOp {
     Open(Handle),
     Close(QualName),
@@ -459,7 +459,6 @@ impl Serialize for SerializableHandle {
                 .map(|h| SerializeOp::Open(h.clone()))
                 .collect(),
         };
-
         while !ops.is_empty() {
             match ops.remove(0) {
                 SerializeOp::Open(handle) => match &handle.data {
@@ -468,11 +467,10 @@ impl Serialize for SerializableHandle {
                         ref attrs,
                         ..
                     } => {
-                        let no_children = !handle.children.borrow().is_empty();
                         serializer.start_elem(
                             name.clone(),
                             attrs.borrow().iter().map(|at| (&at.name, &at.value[..])),
-                            no_children,
+                            handle.children.borrow().is_empty(),
                         )?;
 
                         ops.insert(0, SerializeOp::Close(name.clone()));
@@ -480,13 +478,13 @@ impl Serialize for SerializableHandle {
                         for child in handle.children.borrow().iter().rev() {
                             ops.insert(0, SerializeOp::Open(child.clone()));
                         }
-                    },
+                    }
 
                     &NodeData::Doctype { ref name, .. } => serializer.write_doctype(&name)?,
 
                     &NodeData::Text { ref contents } => {
                         serializer.write_text(&contents.borrow())?
-                    },
+                    }
 
                     &NodeData::Comment { ref contents } => serializer.write_comment(&contents)?,
 
@@ -500,7 +498,7 @@ impl Serialize for SerializableHandle {
 
                 SerializeOp::Close(name) => {
                     serializer.end_elem(name)?;
-                },
+                }
             }
         }
 

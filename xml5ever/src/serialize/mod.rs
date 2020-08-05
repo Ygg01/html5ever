@@ -113,22 +113,34 @@ impl NamespacePrefixMap {
     }
 }
 
-/// Helper function for mapping an Option<T> to T
-///
-/// Usually used to map Option<Atom> to T
-fn map_opt_atom<'a, T: From<&'a str> + Clone>(opt: &Option<T>) -> T {
-    if let Some(atom) = opt {
-        atom.clone()
-    } else {
-        T::from("")
-    }
+trait OptionAtomExt {
+    type InnerAtom;
+    /// Helper function for mapping an Option<T> to T
+    ///
+    /// Usually used to map Option<Atom> to T
+    fn get_or_default(&self) -> Self::InnerAtom;
+
+    /// Helper function for determine if an Option contains a given value
+    fn eq_or_default(&self, rh: &Self::InnerAtom) -> bool;
 }
 
-/// Helper function for determine if an Option contains a given value
-fn opt_eq<T: PartialEq>(opt: &Option<T>, cmp: &T) -> bool {
-    match opt {
-        Some(val) => val == cmp,
-        _ => false,
+impl<T: Default + Clone + PartialEq> OptionAtomExt for Option<T> {
+    type InnerAtom = T;
+
+    fn get_or_default(&self) -> Self::InnerAtom {
+        if let Some(atom) = self {
+            atom.clone()
+        } else {
+            T::default()
+        }
+    }
+
+    fn eq_or_default(&self, rh: &T) -> bool {
+        match self {
+            None if rh == &T::default() => true,
+            Some(val) => val == rh,
+            _ => false,
+        }
     }
 }
 
@@ -222,7 +234,6 @@ impl Default for ElemInfo {
 pub struct XmlSerializer<Wr> {
     writer: Wr,
     opts: SerializeOpts,
-    skip_end_tag: bool,
     stack: Vec<ElemInfo>,
 }
 
@@ -232,7 +243,6 @@ impl<Wr: Write> XmlSerializer<Wr> {
         XmlSerializer {
             writer,
             opts,
-            skip_end_tag: false,
             stack: Vec::new(),
         }
     }
@@ -335,7 +345,7 @@ impl<Wr: Write> XmlSerializer<Wr> {
 
                         map.add(namespace_definition.clone(), prefix_definition.clone());
                         local_prefixes_map
-                            .insert(prefix_definition, map_opt_atom(&namespace_definition));
+                            .insert(prefix_definition, namespace_definition.get_or_default());
                     }
                 }
             }
@@ -383,7 +393,7 @@ impl<Wr: Write> XmlSerializer<Wr> {
                     let redeclare_xml_namespace = Namespace::from(attr.1) == ns!(xml);
                     let ignored_ns_def = ignore_namespace_definition && attr.0.prefix.is_none();
                     let redefine_namespace = match &attr.0.prefix {
-                        Some(prefix) => {
+                        Some(_prefix) => {
                             let local_name = Prefix::from(&*attr.0.local);
                             let ns_attr_value = Some(Namespace::from(&*attr.1));
                             let found_in_local = local_prefixes_map.get(&local_name);
@@ -512,7 +522,7 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
         let mut qualified_name = String::new();
 
         // 3.2.1.1 point 4
-        self.skip_end_tag = false;
+        let mut skip_end_tag = false;
 
         // 3.2.1.1 point 5
         let mut ignore_namespace_definition = false;
@@ -537,101 +547,99 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
         // let ns be the value of the node's namespaceURI attribute
         let ns = name.ns.clone();
 
-        match inherited_ns {
-            // 3.2.1.1. point 11
-            // If inherited_ns is equal to ns
-            Some(inherited_ns) if inherited_ns == ns => {
-                // if local default namespace is not null, then ignore namespace definition attribute
+        // 3.2.1.1. point 11
+        // If inherited_ns is equal to ns
+        if inherited_ns.eq_or_default(&ns) {
+            // if local default namespace is not null, then ignore namespace definition attribute
+            if local_default_namespace.is_some() {
+                ignore_namespace_definition = true;
+            }
+            // If ns is in the XML namespace
+            // then append to qualified name "xml"
+            // else append node's local name, node prefix is dropped.
+            if ns == ns!(xml) {
+                write!(qualified_name, "xml:{}", &name.local).map_err(convert_fmt_to_io_error)?;
+            } else {
+                write!(qualified_name, "{}", &name.local).map_err(convert_fmt_to_io_error)?;
+            }
+            self.writer.write_all(qualified_name.as_bytes())?;
+        }
+        // 3.2.1.1. point 12
+        // Otherwise, inherited_ns is not equal to ns (the node's
+        else {
+            let prefix = name.prefix.clone();
+            let mut candidate_prefix =
+                map.retrieve_preferred_prefix(&inherited_ns, &prefix.get_or_default());
+
+            if prefix.eq_str("xmlns") {
+                if self.opts.require_well_formed {
+                    return Err(Error::new(InvalidData, format!("An Element with prefix 'xmlns' will not legally round-trip in a conforming XML parser. ")));
+                }
+                candidate_prefix = prefix.clone();
+            }
+            // Found a suitable namespace prefix
+            if let Some(candidate_prefix) = candidate_prefix {
+                // Append the candidate prefix, ':' and node's local name.
+                write!(qualified_name, "{}:{}", candidate_prefix, name.local)
+                    .map_err(convert_fmt_to_io_error)?;
+                self.writer.write_all(qualified_name.as_bytes())?;
+
+                if let Some(ref local_default_namespace) = local_default_namespace {
+                    if local_default_namespace == &ns!() {
+                        inherited_ns = None;
+                    } else if local_default_namespace != &ns!(xml) {
+                        inherited_ns = Some(local_default_namespace.clone());
+                    }
+                }
+            }
+            // Otherwise if prefix is not null then
+            if let Some(mut some_prefix) = prefix {
+                // If the local prefixes map contains a key matching prefix (non null)
+                // then let prefix be a newly generated prefix
+                if local_prefixes_map.contains_key(&some_prefix) {
+                    some_prefix = generate_prefix(&mut map, &ns, &mut self.opts)
+                }
+
+                map.add(Some(ns.clone()), some_prefix.clone());
+
+                write!(qualified_name, "{}:{}", some_prefix, name.local)
+                    .map_err(convert_fmt_to_io_error)?;
+                self.writer.write_all(qualified_name.as_bytes())?;
+
+                self.writer.write_all(b" xmlns:")?;
+                self.writer.write_all(some_prefix.as_bytes())?;
+                self.writer.write_all(b"=\"")?;
+                self.serialize_attr_value(&ns)?;
+                self.writer.write_all(b"\"")?;
+
                 if local_default_namespace.is_some() {
-                    ignore_namespace_definition = true;
+                    inherited_ns = local_default_namespace;
                 }
-                // If ns is in the XML namespace
-                // then append to qualified name "xml"
-                // else append node's local name, node prefix is dropped.
-                if ns == ns!(xml) {
-                    write!(qualified_name, "xml:{}", &name.local)
-                        .map_err(convert_fmt_to_io_error)?;
-                } else {
-                    write!(qualified_name, "{}", &name.local).map_err(convert_fmt_to_io_error)?;
-                }
+            }
+            // Otherwise, if local default namespace is null, or local default namespace is not null
+            // and its value is not equal to ns
+            else if local_default_namespace.is_none()
+                || (local_default_namespace.is_some() && local_default_namespace.eq_or_default(&ns))
+            {
+                ignore_namespace_definition = true;
+
+                write!(qualified_name, "{}", name.local).map_err(convert_fmt_to_io_error)?;
+
+                inherited_ns = Some(ns.clone());
+
+                self.writer.write_all(qualified_name.as_bytes())?;
+                self.writer.write_all(b" xmlns=\"")?;
+                self.serialize_attr_value(&ns)?;
+                self.writer.write_all(b"\"")?;
+            }
+            // Node has local default namespace that matches ns
+            else if local_default_namespace.eq_or_default(&ns) {
+                write!(qualified_name, "{}", name.local).map_err(convert_fmt_to_io_error)?;
+                inherited_ns = Some(ns.clone());
                 self.writer.write_all(qualified_name.as_bytes())?;
             }
-            // 3.2.1.1. point 12
-            // Otherwise, inherited_ns is not equal to ns (the node's
-            _ => {
-                let mut prefix = name.prefix.clone();
-                let mut candidate_prefix =
-                    map.retrieve_preferred_prefix(&inherited_ns, &map_opt_atom(&prefix));
-
-                if prefix.eq_str("xmlns") {
-                    if self.opts.require_well_formed {
-                        return Err(Error::new(InvalidData, format!("An Element with prefix 'xmlns' will not legally round-trip in a conforming XML parser. ")));
-                    }
-                    candidate_prefix = prefix.clone();
-                }
-                // Found a suitable namespace prefix
-                if let Some(candidate_prefix) = candidate_prefix {
-                    // Append the candidate prefix, ':' and node's local name.
-                    write!(qualified_name, "{}:{}", candidate_prefix, name.local)
-                        .map_err(convert_fmt_to_io_error)?;
-                    self.writer.write_all(qualified_name.as_bytes())?;
-
-                    if let Some(ref local_default_namespace) = local_default_namespace {
-                        if local_default_namespace == &ns!() {
-                            inherited_ns = None;
-                        } else if local_default_namespace != &ns!(xml) {
-                            inherited_ns = Some(local_default_namespace.clone());
-                        }
-                    }
-                }
-                // Otherwise if prefix is not null then
-                if let Some(mut some_prefix) = prefix {
-                    // If the local prefixes map contains a key matching prefix (non null)
-                    // then let prefix be a newly generated prefix
-                    if local_prefixes_map.contains_key(&some_prefix) {
-                        some_prefix = generate_prefix(&mut map, &ns, &mut self.opts)
-                    }
-
-                    map.add(Some(ns.clone()), some_prefix.clone());
-
-                    write!(qualified_name, "{}:{}", some_prefix, name.local)
-                        .map_err(convert_fmt_to_io_error)?;
-                    self.writer.write_all(qualified_name.as_bytes())?;
-
-                    self.writer.write_all(b" xmlns:")?;
-                    self.writer.write_all(some_prefix.as_bytes())?;
-                    self.writer.write_all(b"=\"")?;
-                    self.serialize_attr_value(&ns)?;
-                    self.writer.write_all(b"\"")?;
-
-                    if local_default_namespace.is_some() {
-                        inherited_ns = local_default_namespace;
-                    }
-                }
-                // Otherwise, if local default namespace is null, or local default namespace is not null
-                // and its value is not equal to ns
-                else if local_default_namespace.is_none()
-                    || (local_default_namespace.is_some() && opt_eq(&local_default_namespace, &ns))
-                {
-                    ignore_namespace_definition = true;
-
-                    write!(qualified_name, "{}", name.local).map_err(convert_fmt_to_io_error)?;
-
-                    inherited_ns = Some(ns.clone());
-
-                    self.writer.write_all(qualified_name.as_bytes())?;
-                    self.writer.write_all(b" xmlns=\"")?;
-                    self.serialize_attr_value(&ns)?;
-                    self.writer.write_all(b"\"")?;
-                }
-                // Node has local default namespace that matches ns
-                else if opt_eq(&local_default_namespace, &ns) {
-                    write!(qualified_name, "{}", name.local).map_err(convert_fmt_to_io_error)?;
-                    inherited_ns = Some(ns.clone());
-                    self.writer.write_all(qualified_name.as_bytes())?;
-                }
-            }
         }
+
         // 3.2.1.1. point 13
         self.serialize_elem_attrs(
             attributes,
@@ -646,7 +654,7 @@ impl<Wr: Write> Serializer for XmlSerializer<Wr> {
         // 3.2.1.1. point 14
         if ignore_children {
             self.writer.write_all(b" /")?;
-            self.skip_end_tag = true;
+            skip_end_tag = true;
         }
         // 3.2.1.1. point 15
         else if empty_node {
